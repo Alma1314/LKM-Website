@@ -60,15 +60,40 @@ services:
     networks:
       - lkm
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lkm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-lkm}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - lkm
+
   backend:
     build:
       context: ./LKM-service
       dockerfile: Dockerfile
     image: lkm-service:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       LKM_ENV: production
-      LKM_DB_DRIVER: sqlite
-      LKM_DB_PATH: /data/lkm.db
+      LKM_DB_DRIVER: postgresql
+      LKM_DB_HOST: postgres
+      LKM_DB_PORT: 5432
+      LKM_DB_NAME: ${POSTGRES_DB:-lkm}
+      LKM_DB_USER: ${POSTGRES_USER:-lkm}
+      LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
       LKM_BLOG_REPO_DIR: /data/blog_repos
       LKM_FILES_STORE_DIR: /data/files_store
       LKM_JWT_SECRET: ${LKM_JWT_SECRET:?生产需设置 LKM_JWT_SECRET}
@@ -102,6 +127,7 @@ volumes:
   certbot_conf:
   certbot_www:
   backend_data:
+  postgres_data:
 
 networks:
   lkm:

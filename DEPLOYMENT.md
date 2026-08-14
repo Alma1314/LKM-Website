@@ -4,7 +4,7 @@
 
 ## 架构概览
 
-单机 docker-compose 编排 4 个服务,nginx 为唯一对外入口:
+单机 docker-compose 编排 5 个服务,nginx 为唯一对外入口:
 
 | 服务 | 镜像 | 端口(对外) | 职责 |
 |---|---|---|---|
@@ -12,6 +12,7 @@
 | `certbot` | `certbot/certbot` | 无 | 申请与自动续期 Let's Encrypt 证书(webroot) |
 | `astro` | `lkm-official-website:latest` | 仅内网 `4321` | 前端 SSR |
 | `backend` | `lkm-service:latest` | 仅内网 `8000` | FastAPI + GraphQL |
+| `postgres` | `postgres:16-alpine` | 仅内网 `5432` | 后端数据库 |
 
 请求分流(443 端口):
 
@@ -44,13 +45,13 @@ LKM-Website/                  # 根仓库(含 docker-compose.yml 与本教程)
 └── LKM-service/              # 后端仓库(含后端 Dockerfile)
 ```
 
-示例(替换为你的实际仓库地址):
+示例:
 
 ```sh
-git clone <根仓库地址> LKM-Website
+git clone https://github.com/Alma1314/LKM-Website.git
 cd LKM-Website
-git clone <前端仓库地址> LKM-official-website
-git clone <后端仓库地址> LKM-service
+git clone https://github.com/LKM-AHZ/LKM-official-website.git
+git clone https://github.com/LKM-AHZ/LKM-service.git
 ```
 
 ## 二、配置环境变量
@@ -62,6 +63,13 @@ git clone <后端仓库地址> LKM-service
 LKM_JWT_SECRET=<64 位以上随机串>
 LKM_TOTP_ENCRYPTION_KEY=<64 位以上随机串>
 LKM_VERIFICATION_CODE_PEPPER=<64 位以上随机串>
+
+# PostgreSQL 数据库密码(必须设置)
+POSTGRES_PASSWORD=<强随机密码>
+
+# 可选:覆盖数据库用户名/库名(默认均为 lkm)
+POSTGRES_USER=lkm
+POSTGRES_DB=lkm
 
 # 可选:GitHub OAuth 登录(不启用可留空)
 LKM_GITHUB_CLIENT_ID=
@@ -84,7 +92,7 @@ cd LKM-Website
 docker compose up -d --build
 ```
 
-首次构建需拉取基础镜像与依赖,可能耗时数分钟。启动顺序由 `depends_on` 健康检查保证:先 `backend`、`astro`,就绪后 `nginx` 再启动。
+首次构建需拉取基础镜像与依赖,可能耗时数分钟。启动顺序由 `depends_on` 健康检查保证:先 `postgres`、`backend`、`astro`,就绪后 `nginx` 再启动。
 
 ## 四、首次签发 HTTPS 证书
 
@@ -149,19 +157,114 @@ git pull
 docker compose up -d --build
 ```
 
+## 数据库
+
+### 默认方案：docker 内置 PostgreSQL
+
+`docker compose up` 会自动拉取 `postgres:16-alpine` 镜像并启动;后端首次启动时通过 Alembic 自动建表,无需手动初始化。
+
+连接数据库:
+
+```sh
+docker compose exec postgres psql -U lkm -d lkm
+```
+
+常用 SQL:
+
+```sql
+\dt          -- 列出所有表
+\d users     -- 查看某张表结构
+```
+
+手动执行迁移(一般不需要,后端启动已自动执行):
+
+```sh
+docker compose exec backend alembic upgrade head
+docker compose exec backend alembic current
+```
+
+备份与恢复:
+
+```sh
+# 备份
+docker compose exec -T postgres pg_dump -U lkm lkm > backup_db_$(date +%F).sql
+
+# 恢复
+docker compose exec -T postgres psql -U lkm -d lkm < backup_db.sql
+```
+
+### 可选方案：主机手动安装 PostgreSQL
+
+若需复用主机已有数据库实例,可在主机直接安装 PostgreSQL 并让后端连接外部库。
+
+1. 安装并启动:
+
+```sh
+sudo apt update && sudo apt install -y postgresql postgresql-contrib
+sudo systemctl enable --now postgresql
+```
+
+2. 建库建用户:
+
+```sh
+sudo -u postgres psql -c "CREATE USER lkm WITH PASSWORD '<强密码>';"
+sudo -u postgres psql -c "CREATE DATABASE lkm OWNER lkm;"
+```
+
+3. 允许 Docker 容器连接:
+
+- 编辑 `/etc/postgresql/*/main/postgresql.conf`,将 `listen_addresses` 改为 `'*'`。
+- 在 `/etc/postgresql/*/main/pg_hba.conf` 末尾追加一行:
+
+```
+host all lkm 172.16.0.0/12 scram-sha-256
+```
+
+- 重启:
+
+```sh
+sudo systemctl restart postgresql
+```
+
+4. 修改 `docker-compose.yml`:删除 `postgres` 服务,并把 `backend` 的数据库连接指向宿主机:
+
+```yaml
+  backend:
+    environment:
+      LKM_DB_DRIVER: postgresql
+      LKM_DB_HOST: 172.17.0.1   # 宿主机在 docker 网桥上的地址
+      LKM_DB_PORT: 5432
+      LKM_DB_NAME: lkm
+      LKM_DB_USER: lkm
+      LKM_DB_PASSWORD: <与建库时一致>
+```
+
+然后重新启动:
+
+```sh
+docker compose up -d backend
+```
+
+> docker 内置库零配置、随仓库走、备份简单,推荐默认使用;主机手动安装适用于复用已有数据库实例或需要更细管控的场景。
+
 ## 数据持久化
 
-- 后端数据(SQLite 数据库、博客 git 仓库、上传文件)在 `backend_data` 卷,容器内挂载到 `/data`。
+- 数据库在 `postgres_data` 卷(postgres 容器 `/var/lib/postgresql/data`)。
+- 后端文件数据(博客 git 仓库 `blog_repos/`、上传文件 `files_store/`)在 `backend_data` 卷,挂载到后端容器 `/data`。
 - 备份示例:
 
 ```sh
+# 数据库
+docker compose exec postgres pg_dump -U lkm lkm > backup_db_$(date +%F).sql
+
+# 文件数据
 docker run --rm -v lkm_backend_data:/data -v "$PWD":/backup alpine \
-  tar czf /backup/backend_data_$(date +%F).tar.gz -C /data .
+  tar czf /backup/backend_files_$(date +%F).tar.gz -C /data .
 ```
 
 ## 常见问题
 
 - **后端反复重启(Exited 3)**:通常是密钥缺失或过短。确认 `.env` 中三个密钥已设置为强随机值,并 `docker compose up -d` 重读。
 - **上传大文件被拒**:nginx 已设 `client_max_body_size 100m`,与后端 100MB 上限对齐;更大文件需同时改 nginx 配置与后端 `max_upload_bytes`。
-- **数据库**:当前使用 SQLite(卷持久化)。如需 PostgreSQL,需另加 `postgres` 服务并配置 `LKM_DB_DRIVER=postgresql` 及连接参数(超出本教程默认范围)。
+- **数据库**:使用 PostgreSQL(`postgres:16-alpine` 服务,卷持久化)。后端经 `LKM_DB_*` 环境变量以 `postgresql+asyncpg` 连接;首次启动时 alembic 自动建表。
 - **换域名/子路径**:需同步改 nginx 配置的 `server_name`、证书签发域名,以及前端 `PUBLIC_SITE_URL` / `PUBLIC_BASE_PATH`。
