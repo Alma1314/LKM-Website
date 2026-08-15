@@ -2,6 +2,7 @@
 docs
 .env
 
-# 两个子项目各自是独立 git 仓库，根仓库不嵌套跟踪
+# 子项目各自是独立 git 仓库，根仓库不嵌套跟踪
 LKM-official-website/
 LKM-service/
+LKM-on-VSCode/
