@@ -4,7 +4,7 @@
 
 ## 架构概览
 
-单机 docker-compose 编排 5 个服务,nginx 为唯一对外入口:
+单机 docker-compose 编排 6 个服务,nginx 为唯一对外入口:
 
 | 服务 | 镜像 | 端口(对外) | 职责 |
 |---|---|---|---|
@@ -13,6 +13,7 @@
 | `astro` | `lkm-official-website:latest` | 仅内网 `4321` | 前端 SSR |
 | `backend` | `lkm-service:latest` | 仅内网 `8000` | FastAPI + GraphQL |
 | `postgres` | `postgres:16-alpine` | 仅内网 `5432` | 后端数据库 |
+| `redis` | `redis:7-alpine` | 仅内网 `6379` | 后端共享限流 / 缓存(RPOPLPUSH 限流、RMW 语义) |
 
 请求分流(443 端口):
 
@@ -71,6 +72,10 @@ POSTGRES_PASSWORD=<强随机密码>
 POSTGRES_USER=lkm
 POSTGRES_DB=lkm
 
+# Redis(compose 已默认指向 redis 服务,一般无需改动)
+# 留空则后端回退到单机内存版限流(共享限流失效);生产建议保留 compose 默认值
+# LKM_REDIS_URL=redis://redis:6379/0
+
 # 可选:GitHub OAuth 登录(不启用可留空)
 LKM_GITHUB_CLIENT_ID=
 LKM_GITHUB_CLIENT_SECRET=
@@ -92,7 +97,7 @@ cd LKM-Website
 docker compose up -d --build
 ```
 
-首次构建需拉取基础镜像与依赖,可能耗时数分钟。启动顺序由 `depends_on` 健康检查保证:先 `postgres`、`backend`、`astro`,就绪后 `nginx` 再启动。
+首次构建需拉取基础镜像与依赖,可能耗时数分钟。启动顺序由 `depends_on` 健康检查保证:先 `postgres`、`redis`、`backend`、`astro`,就绪后 `nginx` 再启动。
 
 ## 四、首次签发 HTTPS 证书
 
@@ -250,6 +255,7 @@ docker compose up -d backend
 ## 数据持久化
 
 - 数据库在 `postgres_data` 卷(postgres 容器 `/var/lib/postgresql/data`)。
+- Redis 在 `redis_data` 卷(redis 容器 `/data`,已开启 AOF `appendonly yes`;内容多为可重建的限流/缓存数据,一般无需单独备份)。
 - 后端文件数据(博客 git 仓库 `blog_repos/`、上传文件 `files_store/`)在 `backend_data` 卷,挂载到后端容器 `/data`。
 - 备份示例:
 

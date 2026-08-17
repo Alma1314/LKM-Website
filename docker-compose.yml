@@ -79,6 +79,21 @@ services:
     networks:
       - lkm
 
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - lkm
+
   backend:
     build:
       context: ./LKM-service
@@ -86,6 +101,8 @@ services:
     image: lkm-service:latest
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     environment:
       LKM_ENV: production
@@ -95,6 +112,7 @@ services:
       LKM_DB_NAME: ${POSTGRES_DB:-lkm}
       LKM_DB_USER: ${POSTGRES_USER:-lkm}
       LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
+      LKM_REDIS_URL: redis://redis:6379/0
       LKM_BLOG_REPO_DIR: /data/blog_repos
       LKM_FILES_STORE_DIR: /data/files_store
       LKM_JWT_SECRET: ${LKM_JWT_SECRET:?生产需设置 LKM_JWT_SECRET}
@@ -124,11 +142,54 @@ services:
     networks:
       - lkm
 
+  worker-send:
+    image: lkm-service:latest
+    command: ['python', '-m', 'app.core.worker_send']
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      LKM_ENV: production
+      LKM_REDIS_URL: redis://redis:6379/0
+      LKM_DB_DRIVER: postgresql
+      LKM_DB_HOST: postgres
+      LKM_DB_PORT: 5432
+      LKM_DB_NAME: ${POSTGRES_DB:-lkm}
+      LKM_DB_USER: ${POSTGRES_USER:-lkm}
+      LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
+    restart: unless-stopped
+    networks:
+      - lkm
+
+  worker:
+    image: lkm-service:latest
+    command: ['python', '-m', 'app.core.worker_default']
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      LKM_ENV: production
+      LKM_REDIS_URL: redis://redis:6379/0
+      LKM_DB_DRIVER: postgresql
+      LKM_DB_HOST: postgres
+      LKM_DB_PORT: 5432
+      LKM_DB_NAME: ${POSTGRES_DB:-lkm}
+      LKM_DB_USER: ${POSTGRES_USER:-lkm}
+      LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
+    restart: unless-stopped
+    networks:
+      - lkm
+
 volumes:
   certbot_conf:
   certbot_www:
   backend_data:
   postgres_data:
+  redis_data:
 
 networks:
   lkm:
