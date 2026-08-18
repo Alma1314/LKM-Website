@@ -113,6 +113,8 @@ services:
       LKM_DB_USER: ${POSTGRES_USER:-lkm}
       LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
       LKM_REDIS_URL: redis://redis:6379/0
+      # 多 worker：按压测基线调，默认单 worker；多核下水平跑满 CPU
+      LKM_WEB_WORKERS: ${LKM_WEB_WORKERS:-1}
       LKM_BLOG_REPO_DIR: /data/blog_repos
       LKM_FILES_STORE_DIR: /data/files_store
       LKM_JWT_SECRET: ${LKM_JWT_SECRET:?生产需设置 LKM_JWT_SECRET}
