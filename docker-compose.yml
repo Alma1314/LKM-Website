@@ -152,10 +152,10 @@ services:
       LKM_VERIFICATION_CODE_PEPPER: ${LKM_VERIFICATION_CODE_PEPPER:?生产需设置 LKM_VERIFICATION_CODE_PEPPER}
       LKM_GITHUB_CLIENT_ID: ${LKM_GITHUB_CLIENT_ID:-}
       LKM_GITHUB_CLIENT_SECRET: ${LKM_GITHUB_CLIENT_SECRET:-}
-      LKM_RP_ID: lkm.s12mc.xyz
-      LKM_ORIGIN: https://lkm.s12mc.xyz
-      LKM_GITHUB_REDIRECT_URI: https://lkm.s12mc.xyz/api/v1/auth/oauth/github/callback
-      LKM_FRONTEND_CALLBACK: https://lkm.s12mc.xyz/login/success
+      LKM_RP_ID: 124.220.55.235
+      LKM_ORIGIN: http://124.220.55.235
+      LKM_GITHUB_REDIRECT_URI: http://124.220.55.235/api/v1/auth/oauth/github/callback
+      LKM_FRONTEND_CALLBACK: http://124.220.55.235/login/success
     volumes:
       - backend_data:/data
     restart: unless-stopped
