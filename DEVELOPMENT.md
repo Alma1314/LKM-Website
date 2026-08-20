@@ -104,7 +104,31 @@ LKM_VERIFICATION_CODE_PEPPER=<与上面都不同>
 ```
 
 - 数据库:默认 SQLite;需 PostgreSQL 时设 `LKM_DB_DRIVER=postgresql` 及 `LKM_DB_HOST/PORT/NAME/USER/PASSWORD`。
-- Redis:设 `LKM_REDIS_URL=redis://...` 启用共享限流;留空回退单机。
+- Redis:设 `LKM_REDIS_URL=redis://...` 启用共享限流与任务队列;留空回退单机(限流失效、任务队列不消费)。
+
+### 对象存储(文件库与头像)
+
+后端存储抽象为 Local/S3 双后端(`LKM_STORAGE_BACKEND`,默认 `local`)。本地开发默认走本地磁盘:
+
+- **文件库**:存在 `files_store/`;头像等 `avatars/`。均经 `get_storage()` 统一读写。
+- **头像端点**:`GET /api/v1/avatars/{name}.webp`,从 storage 流式返回,带
+  `public, max-age=31536000, immutable` 长缓存头;内容不变时文件名即指纹。
+- **切 MinIO/S3 对象存储**:设 `LKM_STORAGE_BACKEND=s3`,并配
+  `LKM_S3_ENDPOINT_URL`(本地 MinIO 填 `http://127.0.0.1:9000`)、`LKM_S3_BUCKET`(默认 `lkm`)、
+  `LKM_S3_PREFIX`(默认 `files`)、`LKM_S3_ACCESS_KEY` / `LKM_S3_SECRET_KEY`。
+- **存量迁移**:本地磁盘已有文件时,在切换 S3 前跑一次性脚本搬迁(幂等):
+  `./.venv/Scripts/python.exe -m scripts.migrate_files_to_s3` 、
+  `./.venv/Scripts/python.exe -m scripts.migrate_avatars_to_s3`。
+
+### 任务队列(worker)
+
+后端用 Redis + ARQ 消费异步任务(节点事件推送、发送任务等),生产由 compose 的 `worker` /
+`worker-send` 两个服务独立消费。本地 dev 脚本不启动 worker,需要验证队列消费时手动起:
+
+```sh
+uv run python -m app.core.worker_default   # 默认队列
+uv run python -m app.core.worker_send      # 发送队列
+```
 
 ### 测试
 
@@ -188,4 +212,4 @@ node scripts/generate-icons.mjs
 - **dev 报 `Unable to locate icon`**:新增图标后没跑 `node scripts/generate-icons.mjs`。
 - **前端 dev 异常/卡死**:用 `pnpm dev:clean` 清 vite 缓存后重启。
 - **集成测试 skipped**:`uv run pytest -m integration` 需要先设置 `LKM_REDIS_URL` 并启动 Redis。
-- **数据库是全新的**:后端启动时(`lifespan` 的 `init_db`)会自动执行 Alembic 迁移建表,SQLite 与 PostgreSQL 均无需手动初始化;需要手动管理迁移时用 `uv run alembic upgrade head`。
+- **数据库是全新的**:后端启动时(`lifespan` 的 `init_db`)默认用 `Base.metadata.create_all()` 自动建缺失表（开发免维护增量迁移；新增表只改 `models.py` 即可，SQLite 与 PostgreSQL 均无需手动初始化）;生产/有历史数据的库需显式设 `LKM_USE_ALEMBIC=true` 走 Alembic 增量迁移,手动管理时用 `uv run alembic upgrade head`。

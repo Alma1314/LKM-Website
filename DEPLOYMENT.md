@@ -4,7 +4,7 @@
 
 ## 架构概览
 
-单机 docker-compose 编排 6 个服务,nginx 为唯一对外入口:
+单机 docker-compose 编排 9 个服务,nginx 为唯一对外入口:
 
 | 服务 | 镜像 | 端口(对外) | 职责 |
 |---|---|---|---|
@@ -12,8 +12,14 @@
 | `certbot` | `certbot/certbot` | 无 | 申请与自动续期 Let's Encrypt 证书(webroot) |
 | `astro` | `lkm-official-website:latest` | 仅内网 `4321` | 前端 SSR |
 | `backend` | `lkm-service:latest` | 仅内网 `8000` | FastAPI + GraphQL |
+| `worker` | `lkm-service:latest` | 无 | 默认任务队列(ARQ)。`python -m app.core.worker_default` |
+| `worker-send` | `lkm-service:latest` | 无 | 发送队列 worker。`python -m app.core.worker_send` |
 | `postgres` | `postgres:16-alpine` | 仅内网 `5432` | 后端数据库 |
-| `redis` | `redis:7-alpine` | 仅内网 `6379` | 后端共享限流 / 缓存(RPOPLPUSH 限流、RMW 语义) |
+| `redis` | `redis:7-alpine` | 仅内网 `6379` | 任务队列、共享限流 / 缓存(ARQ 队列、RPOPLPUSH 限流、RMW 语义) |
+| `minio` | `minio/minio:latest` | 仅容器内 `9000`/`9001` | S3 兼容对象存储:文件库文件与成员头像 |
+
+> `worker` / `worker-send` 与 `backend` 共用 `lkm-service:latest` 镜像,仅启动入口不同;
+> 两者依赖 Redis + PostgreSQL,负责异步消费任务队列(节点事件推送、发送任务等)。
 
 请求分流(443 端口):
 
@@ -76,6 +82,14 @@ POSTGRES_DB=lkm
 # 留空则后端回退到单机内存版限流(共享限流失效);生产建议保留 compose 默认值
 # LKM_REDIS_URL=redis://redis:6379/0
 
+# MinIO 对象存储(必须设置密码;文件库与成员头像均存于此)
+MINIO_ROOT_PASSWORD=<强随机密码>
+# 可选:MinIO 管理员账号(默认 lkmadmin)
+# MINIO_ROOT_USER=lkmadmin
+# 可选:S3 桶名/对象 key 前缀(默认 lkm / files)
+# LKM_S3_BUCKET=lkm
+# LKM_S3_PREFIX=files
+
 # 可选:GitHub OAuth 登录(不启用可留空)
 LKM_GITHUB_CLIENT_ID=
 LKM_GITHUB_CLIENT_SECRET=
@@ -97,7 +111,7 @@ cd LKM-Website
 docker compose up -d --build
 ```
 
-首次构建需拉取基础镜像与依赖,可能耗时数分钟。启动顺序由 `depends_on` 健康检查保证:先 `postgres`、`redis`、`backend`、`astro`,就绪后 `nginx` 再启动。
+首次构建需拉取基础镜像与依赖,可能耗时数分钟。启动顺序由 `depends_on` 健康检查保证:先 `postgres`、`redis`、`minio` 就绪,再启动 `backend`(`worker`/`worker-send` 依赖 DB + Redis 同步拉起),`astro` 就绪后 `nginx` 再启动。
 
 ## 四、首次签发 HTTPS 证书
 
@@ -133,6 +147,10 @@ curl -X POST https://lkm.s12mc.xyz/graphql \
 # 静态资源缓存头(应含 Cache-Control: public, immutable)
 curl -I https://lkm.s12mc.xyz/_astro/<某资源路径>
 
+# 成员头像(经 MinIO 存储代理端点,含 immutable 长缓存头)
+curl -I https://lkm.s12mc.xyz/api/v1/avatars/<成员.webp>
+# 期望: Cache-Control: public, max-age=31536000, immutable
+
 # 证书链与有效期
 openssl s_client -connect lkm.s12mc.xyz:443 </dev/null 2>/dev/null | openssl x509 -noout -dates
 ```
@@ -153,9 +171,17 @@ docker compose ps
 # 查看日志
 docker compose logs -f nginx
 docker compose logs -f backend
+docker compose logs -f worker       # 任务队列消费
+docker compose logs -f worker-send  # 发送队列
 
 # 重启单个服务
 docker compose restart backend
+
+# MinIO Web 控制台(9001)仅在容器内网,未对外映射;需要浏览器访问时,
+# 在 docker-compose.yml 的 minio 服务临时加 `ports: ['9001:9001']` 后 `docker compose up -d minio`,
+# 访问 http://<主机IP>:9001,账号见 .env 的 MINIO_ROOT_USER/PASSWORD。或用镜像内置的 mc 命令行:
+docker compose exec minio mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+docker compose exec minio mc ls local/lkm   # 列出默认桶内容
 
 # 更新代码后重新构建并重启
 git pull
@@ -256,16 +282,31 @@ docker compose up -d backend
 
 - 数据库在 `postgres_data` 卷(postgres 容器 `/var/lib/postgresql/data`)。
 - Redis 在 `redis_data` 卷(redis 容器 `/data`,已开启 AOF `appendonly yes`;内容多为可重建的限流/缓存数据,一般无需单独备份)。
-- 后端文件数据(博客 git 仓库 `blog_repos/`、上传文件 `files_store/`)在 `backend_data` 卷,挂载到后端容器 `/data`。
+- 文件库上传文件与成员头像存在 **MinIO** 对象存储(`minio_data` 卷);后端以 S3 兼容接口读写。
+- 博客 git 仓库(`blog_repos/`)在 `backend_data` 卷,挂载到后端容器 `/data`(`files_store` 为存量迁移源,运行时不写)。
 - 备份示例:
 
 ```sh
 # 数据库
 docker compose exec postgres pg_dump -U lkm lkm > backup_db_$(date +%F).sql
 
-# 文件数据
+# MinIO 对象(含文件库与头像)
+docker compose exec minio sh -c 'mc alias set m http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && mc mirror --preserve m/lkm ./minio_backup_$(date +%F)'
+
+# 后端卷(博客 git 仓库)
 docker run --rm -v lkm_backend_data:/data -v "$PWD":/backup alpine \
   tar czf /backup/backend_files_$(date +%F).tar.gz -C /data .
+```
+
+## 迁移存量到 MinIO
+
+首次从「本地磁盘存储」切换到 MinIO 时,若本地已有存量,在**切换前**(`LKM_STORAGE_BACKEND=s3` 生效前)执行一次性迁移脚本把本地数据搬进 MinIO(幂等,空数据安全跳过):
+
+```sh
+cd LKM-service
+# 需先配好指向 MinIO 的 LKM_STORAGE_BACKEND=s3 及 s3_* 连接参数
+./.venv/Scripts/python.exe -m scripts.migrate_files_to_s3       # 文件库存量
+./.venv/Scripts/python.exe -m scripts.migrate_avatars_to_s3     # 预置成员头像
 ```
 
 ## 常见问题

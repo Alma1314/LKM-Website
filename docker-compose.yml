@@ -94,6 +94,26 @@ services:
     networks:
       - lkm
 
+  minio:
+    image: minio/minio:latest
+    command: ['server', '/data', '--console-address', ':9001']
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-lkmadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?生产需设置 MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    expose:
+      - '9000'
+      - '9001'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - lkm
+
   backend:
     build:
       context: ./LKM-service
@@ -103,6 +123,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     environment:
       LKM_ENV: production
@@ -116,6 +138,14 @@ services:
       # 多 worker：按压测基线调，默认单 worker；多核下水平跑满 CPU
       LKM_WEB_WORKERS: ${LKM_WEB_WORKERS:-1}
       LKM_BLOG_REPO_DIR: /data/blog_repos
+      # 对象存储(MinIO)：文件/头像读写走 S3 后端
+      LKM_STORAGE_BACKEND: s3
+      LKM_S3_ENDPOINT_URL: http://minio:9000
+      LKM_S3_BUCKET: ${LKM_S3_BUCKET:-lkm}
+      LKM_S3_PREFIX: ${LKM_S3_PREFIX:-files}
+      LKM_S3_ACCESS_KEY: ${MINIO_ROOT_USER:-lkmadmin}
+      LKM_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?生产需设置 MINIO_ROOT_PASSWORD}
+      # LKM_FILES_STORE_DIR 仅作迁移脚本参考；运行时对象存于 MinIO（本地路径可保留供迁移读取）
       LKM_FILES_STORE_DIR: /data/files_store
       LKM_JWT_SECRET: ${LKM_JWT_SECRET:?生产需设置 LKM_JWT_SECRET}
       LKM_TOTP_ENCRYPTION_KEY: ${LKM_TOTP_ENCRYPTION_KEY:?生产需设置 LKM_TOTP_ENCRYPTION_KEY}
@@ -182,6 +212,9 @@ services:
       LKM_DB_NAME: ${POSTGRES_DB:-lkm}
       LKM_DB_USER: ${POSTGRES_USER:-lkm}
       LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
+      LKM_BLOG_REPO_DIR: /data/blog_repos   # 与 backend 同卷同路径
+    volumes:
+      - backend_data:/data
     restart: unless-stopped
     networks:
       - lkm
@@ -192,6 +225,7 @@ volumes:
   backend_data:
   postgres_data:
   redis_data:
+  minio_data:
 
 networks:
   lkm:
