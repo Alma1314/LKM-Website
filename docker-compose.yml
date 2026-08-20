@@ -184,6 +184,9 @@ services:
         condition: service_healthy
     environment:
       LKM_ENV: production
+      LKM_JWT_SECRET: ${LKM_JWT_SECRET:?生产需设置 LKM_JWT_SECRET}
+      LKM_TOTP_ENCRYPTION_KEY: ${LKM_TOTP_ENCRYPTION_KEY:?生产需设置 LKM_TOTP_ENCRYPTION_KEY}
+      LKM_VERIFICATION_CODE_PEPPER: ${LKM_VERIFICATION_CODE_PEPPER:?生产需设置 LKM_VERIFICATION_CODE_PEPPER}
       LKM_REDIS_URL: redis://redis:6379/0
       LKM_DB_DRIVER: postgresql
       LKM_DB_HOST: postgres
@@ -205,6 +208,9 @@ services:
         condition: service_healthy
     environment:
       LKM_ENV: production
+      LKM_JWT_SECRET: ${LKM_JWT_SECRET:?生产需设置 LKM_JWT_SECRET}
+      LKM_TOTP_ENCRYPTION_KEY: ${LKM_TOTP_ENCRYPTION_KEY:?生产需设置 LKM_TOTP_ENCRYPTION_KEY}
+      LKM_VERIFICATION_CODE_PEPPER: ${LKM_VERIFICATION_CODE_PEPPER:?生产需设置 LKM_VERIFICATION_CODE_PEPPER}
       LKM_REDIS_URL: redis://redis:6379/0
       LKM_DB_DRIVER: postgresql
       LKM_DB_HOST: postgres
