@@ -102,6 +102,8 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?生产需设置 MINIO_ROOT_PASSWORD}
     volumes:
       - minio_data:/data
+    # MinIO 仅内网，经 nginx /lkm/ 路径对浏览器提供（不开放公网 9000 端口）。
+    # 9001 控制台也仅内网，管理用经 docker exec mc 或临时 expose。
     expose:
       - '9000'
       - '9001'
@@ -141,6 +143,8 @@ services:
       # 对象存储(MinIO)：文件/头像读写走 S3 后端
       LKM_STORAGE_BACKEND: s3
       LKM_S3_ENDPOINT_URL: http://minio:9000
+      # 预签名直传/下载对浏览器暴露地址：MinIO 经 nginx /lkm/ 转发，host 用站点公网地址
+      LKM_S3_PUBLIC_ENDPOINT_URL: ${LKM_S3_PUBLIC_ENDPOINT_URL:-http://124.220.55.235}
       LKM_S3_BUCKET: ${LKM_S3_BUCKET:-lkm}
       LKM_S3_PREFIX: ${LKM_S3_PREFIX:-files}
       LKM_S3_ACCESS_KEY: ${MINIO_ROOT_USER:-lkmadmin}

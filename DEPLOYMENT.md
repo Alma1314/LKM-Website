@@ -21,22 +21,26 @@
 > `worker` / `worker-send` 与 `backend` 共用 `lkm-service:latest` 镜像,仅启动入口不同;
 > 两者依赖 Redis + PostgreSQL,负责异步消费任务队列(节点事件推送、发送任务等)。
 
-请求分流(443 端口):
+请求分流(有域名走 443 / 无域名走 80):
 
 ```
-浏览器 ──> nginx(443, TLS 终止)
-              ├─ /api/      ──> backend:8000   (保持路径)
-              ├─ /graphql   ──> backend:8000   (支持 WebSocket)
-              ├─ /_astro/*  ──> astro:4321     (指纹静态资源, immutable 长缓存)
-              └─ 其余       ──> astro:4321     (SSR)
+浏览器 ──> nginx(80 与 443)
+              ├─ /api/        ──> backend:8000   (保持路径)
+              ├─ /graphql     ──> backend:8000   (支持 WebSocket)
+              ├─ /_astro/*    ──> astro:4321     (指纹静态资源, immutable 长缓存)
+              ├─ /lkm/        ──> minio:9000     (对象存储预签名直传/下载, 保留全部 path+query)
+              └─ 其余         ──> astro:4321     (SSR)
 ```
 
 后端 REST 前缀为 `/api/v1`,GraphQL 为 `/graphql`。nginx 用 Docker 内嵌 DNS(`resolver 127.0.0.11`)在运行时动态解析 `backend`/`astro`,不依赖启动期 DNS。
 
 ## 前置条件
 
-- 一台有公网 IP 的 Linux 主机,防火墙放行 `80` 与 `443` 端口。
-- 域名 `lkm.s12mc.xyz` 已解析到该主机 IP。
+- 一台有公网 IP 的 Linux 主机,防火墙/安全组放行 `80` 与 `443` 端口。
+  > MinIO 不开放独立公网端口:对象存储经 nginx `/lkm/` 路径转发到 `minio:9000`(仅内网),
+  > 浏览器访问经 nginx 统一入口即可,无需在安全组另开 9000。
+- **域名可选**:有域名走 `lkm.s12mc.xyz` + Let's Encrypt 正式证书;**无域名可用公网 IP 直连**——
+  此时走 **HTTP(80)+自签证书(443)** 模式(见下文「无域名/IP 直连」一节),浏览器访问 IP 即可。
 - 已安装 Docker 与 Docker Compose 插件(`docker compose version` 可正常输出)。
 
 ## 一、获取代码
@@ -90,6 +94,11 @@ MINIO_ROOT_PASSWORD=<强随机密码>
 # LKM_S3_BUCKET=lkm
 # LKM_S3_PREFIX=files
 
+# S3 预签名直传/下载的公网地址(浏览器直连 MinIO 用)。
+# 默认走站点公网地址经 nginx /lkm/ 转发(MinIO 不打公网端口),一般无需改动。
+# 若 MinIO 暴露了另外的公网端口,改成对应的地址即可。
+# LKM_S3_PUBLIC_ENDPOINT_URL=http://124.220.55.235
+
 # 可选:GitHub OAuth 登录(不启用可留空)
 LKM_GITHUB_CLIENT_ID=
 LKM_GITHUB_CLIENT_SECRET=
@@ -112,6 +121,35 @@ docker compose up -d --build
 ```
 
 首次构建需拉取基础镜像与依赖,可能耗时数分钟。启动顺序由 `depends_on` 健康检查保证:先 `postgres`、`redis`、`minio` 就绪,再启动 `backend`(`worker`/`worker-send` 依赖 DB + Redis 同步拉起),`astro` 就绪后 `nginx` 再启动。
+
+## 三·五、无域名 / 公网 IP 直连(可选)
+
+没有域名时,用公网 IP 直连(如 `http://124.220.55.235`)。需把默认写死的域名 `lkm.s12mc.xyz`
+替换为你的公网 IP,并把访问方式从「强制 HTTPS」改为「HTTP 为主 + 自签证书兜底」。
+
+改造点(改了如下文件,按你机器 IP 替换,勿再 clone 到默认域名配置):
+
+```sh
+# 1. 根仓库 docker-compose.yml:后端域名变量改成 IP(HTTP)
+LKM_RP_ID: 124.220.55.235
+LKM_ORIGIN: http://124.220.55.235
+LKM_GITHUB_REDIRECT_URI: http://124.220.55.235/api/v1/auth/oauth/github/callback
+LKM_FRONTEND_CALLBACK: http://124.220.55.235/login/success
+
+# 2. 前端
+#    src/data/config.yaml:site 改 http://124.220.55.235
+#    astro.config.ts:allowedHosts 加 "124.220.55.235"
+
+# 3. nginx/nginx.conf:server_name 改 IP;80 端口的 server 不再 301 到 443,
+#    改为直接反代(HTTP 是主入口);443 保留自签证书(供 admin secure cookie 使用)
+
+# 4. nginx/entrypoint.sh:自签证书目录与 CN 用 IP(124.220.55.235)
+```
+
+- **certbot 服务可停**(`docker compose stop certbot`):无域名不签正式证书,其会循环空跑 renew 报错污染日志。
+- **403 后台明文限制**:admin 后台 cookie 带 `Secure`,**纯 HTTP(80)下浏览器不发送** → 后台登录会话无法保持。
+  后台请走 **`https://IP`**(自签证书,浏览器首次点"继续访问/信任")。普通用户前台走 JWT,HTTP 下正常。
+- 浏览器访问 `http://124.220.55.235` 即可查看站点。
 
 ## 四、首次签发 HTTPS 证书
 
@@ -298,6 +336,24 @@ docker run --rm -v lkm_backend_data:/data -v "$PWD":/backup alpine \
   tar czf /backup/backend_files_$(date +%F).tar.gz -C /data .
 ```
 
+## MinIO 首次初始化(建桶 + 迁移预置头像)——必做!
+
+**后端 S3 存储不会自动创建 MinIO 桶**。新部署的 MinIO 里没有 `lkm` 桶,头像/文件库会全部 404/失败。
+启动前先建桶并把预置成员头像迁入:
+
+```sh
+# 1. 建桶(桶名=LKM_S3_BUCKET,默认 lkm)
+docker exec <minio容器名> sh -c 'mc alias set m http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && mc mb --ignore-existing m/lkm'
+
+# 2. 迁移预置成员头像(源在 backend 容器 /app/static/avatars/*.webp,已被 COPY 进镜像)
+docker compose exec backend python -m scripts.migrate_avatars_to_s3
+
+# 3. 验证(带 URL 编码,中文文件名会被编码)
+curl http://<你的IP>/api/v1/avatars/<encodeURIComponent(名)>.webp   # 期望 200
+```
+
+> 文件名含空格者(如 `七月Joshua Xue.webp`)经浏览器加载可能异常,若头像选择器用到需重命名对象。
+
 ## 迁移存量到 MinIO
 
 首次从「本地磁盘存储」切换到 MinIO 时,若本地已有存量,在**切换前**(`LKM_STORAGE_BACKEND=s3` 生效前)执行一次性迁移脚本把本地数据搬进 MinIO(幂等,空数据安全跳过):
@@ -314,4 +370,16 @@ cd LKM-service
 - **后端反复重启(Exited 3)**:通常是密钥缺失或过短。确认 `.env` 中三个密钥已设置为强随机值,并 `docker compose up -d` 重读。
 - **上传大文件被拒**:nginx 已设 `client_max_body_size 100m`,与后端 100MB 上限对齐;更大文件需同时改 nginx 配置与后端 `max_upload_bytes`。
 - **数据库**:使用 PostgreSQL(`postgres:16-alpine` 服务,卷持久化)。后端经 `LKM_DB_*` 环境变量以 `postgresql+asyncpg` 连接;首次启动时 alembic 自动建表。
-- **换域名/子路径**:需同步改 nginx 配置的 `server_name`、证书签发域名,以及前端 `PUBLIC_SITE_URL` / `PUBLIC_BASE_PATH`。
+- **换域名/子路径**:需同步改 nginx 配置的 `server_name`、证书签发域名,以及前端 `PUBLIC_SITE_URL` / `PUBLIC_BASE_PATH`、后端 compose 的 `LKM_ORIGIN`/`LKM_RP_ID`/`LKM_S3_PUBLIC_ENDPOINT_URL`。
+
+- **头像全部 404**:MinIO 桶未创建(S3 不自动建桶)。先 `mc mb .../lkm` 建桶,再 `migrate_avatars_to_s3` 迁移预置头像(见上文「MinIO 首次初始化」)。
+
+- **上传返回 403 SignatureDoesNotMatch**:boto3 对 MinIO 默认生成 SigV2 签名,MinIO 不认 → 需在 s3.py 预签名 client 显式 `signature_version="s3v4"` + `addressing_style="path"` + 给 region。且预签名 URL 的 host 必须与浏览器实际访问的 host 一致(`LKM_S3_PUBLIC_ENDPOINT_URL`)。
+
+- **上传经 nginx 后 400 Bad Request**(而直连 MinIO 正常)**:两个 nginx 细节:
+  1. `/lkm/` 反代 `proxy_pass` 必须带 `$request_uri`(否则丢 `X-Amz-Signature` 等签名参数);
+  2. 不能 `include proxy-common-headers.conf`(其 `Host $host` 会覆盖签名用的 host),应单独 `proxy_set_header Host <公网host>`。
+
+- **MinIO 建议经 nginx 转发而非开公网 9000**:compose 里 minio 保持 `expose`(仅内网),由 nginx `/lkm/` 路径转 发;安全组只需放行 80/443。
+
+- **后台登录后操作报「需要 MFA」**:登录不再强制 2FA(对齐 GitHub),仅后台危险操作(板块审核等)要求 2FA;通过后信任 1 小时。首次需在后台完成 2FA 设置。
