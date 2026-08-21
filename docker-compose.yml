@@ -229,6 +229,33 @@ services:
     networks:
       - lkm
 
+  worker-points:
+    image: lkm-service:latest
+    command: ['python', '-m', 'app.core.worker_points']
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      LKM_ENV: production
+      LKM_JWT_SECRET: ${LKM_JWT_SECRET:?生产需设置 LKM_JWT_SECRET}
+      LKM_TOTP_ENCRYPTION_KEY: ${LKM_TOTP_ENCRYPTION_KEY:?生产需设置 LKM_TOTP_ENCRYPTION_KEY}
+      LKM_VERIFICATION_CODE_PEPPER: ${LKM_VERIFICATION_CODE_PEPPER:?生产需设置 LKM_VERIFICATION_CODE_PEPPER}
+      LKM_REDIS_URL: redis://redis:6379/0
+      LKM_DB_DRIVER: postgresql
+      LKM_DB_HOST: postgres
+      LKM_DB_PORT: 5432
+      LKM_DB_NAME: ${POSTGRES_DB:-lkm}
+      LKM_DB_USER: ${POSTGRES_USER:-lkm}
+      LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
+      LKM_BLOG_REPO_DIR: /data/blog_repos   # 与 backend 同卷同路径
+    volumes:
+      - backend_data:/data
+    restart: unless-stopped
+    networks:
+      - lkm
+
 volumes:
   certbot_conf:
   certbot_www:
