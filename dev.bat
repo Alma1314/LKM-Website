@@ -3,9 +3,10 @@ REM ============================================================
 REM  LKM unified dev server launcher (Windows)
 REM
 REM  Usage:
-REM    dev.bat            start BOTH frontend & backend (single window,
-REM                       realtime interleaved logs, Ctrl+C to stop all)
-REM    dev.bat front      start frontend only (Astro)
+REM    dev.bat            start ALL: SSR frontend + static site + backend
+REM                       (single window, realtime interleaved logs, Ctrl+C to stop)
+REM    dev.bat front      start SSR frontend only (Astro, :4321)
+REM    dev.bat site       start static site only (LKM-official-static, :4322)
 REM    dev.bat back       start backend only (uvicorn :8000)
 REM
 REM  Note (PowerShell): run as .\dev.bat

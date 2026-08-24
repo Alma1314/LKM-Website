@@ -44,7 +44,6 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 4321
-      # SSR 数据获取直连后端(compose 内网别名);浏览器端 /api、/graphql 由 nginx 直接反代
       API_URL: http://backend:8000
     restart: unless-stopped
     healthcheck:
@@ -58,6 +57,17 @@ services:
       options:
         max-size: '10m'
         max-file: '3'
+    networks:
+      - lkm
+
+  static:
+    build:
+      context: ./LKM-official-static
+      dockerfile: static.Dockerfile
+    image: lkm-official-static:latest
+    ports:
+      - '${LKM_STATIC_PORT:-8082}:80'
+    restart: unless-stopped
     networks:
       - lkm
 
@@ -102,8 +112,6 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?生产需设置 MINIO_ROOT_PASSWORD}
     volumes:
       - minio_data:/data
-    # MinIO 仅内网，经 nginx /lkm/ 路径对浏览器提供（不开放公网 9000 端口）。
-    # 9001 控制台也仅内网，管理用经 docker exec mc 或临时 expose。
     expose:
       - '9000'
       - '9001'

@@ -3,24 +3,28 @@
 # LKM 统一开发服务器启动脚本
 #
 # 用法：
-#   ./dev.sh          # 同时启动前端(LKM-official-website)和后端(LKM-service)
-#   ./dev.sh front     # 仅启动前端
+#   ./dev.sh          # 同时启动 SSR 前端(LKM-official-website)+静态官网(LKM-official-static)+后端(LKM-service)
+#   ./dev.sh front     # 仅启动 SSR 前端
+#   ./dev.sh site      # 仅启动静态官网(LKM-official-static)
 #   ./dev.sh back      # 仅启动后端
 #   ./dev.sh --no-run  # 仅安装依赖，不启动服务
 #
 # 环境变量：
 #   LKM_API_KEY 前端里通过 API_URL 指向后端，默认关闭后端请求。
 #   如需让前端连上本脚本启动的后端，可在运行前设置：export API_URL=http://localhost:8000
+#   SITE_PORT 静态官网端口(默认 4322)，避免与 SSR 前端 4321 冲突
 #
 set -euo pipefail
 
-# 脚本所在目录（根目录）与两个子项目路径
+# 脚本所在目录（根目录）与各子项目路径
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND_DIR="$ROOT_DIR/LKM-official-website"
 BACKEND_DIR="$ROOT_DIR/LKM-service"
+SITE_DIR="$ROOT_DIR/LKM-official-static"
 
 # 默认端口
 BACKEND_PORT="${BACKEND_PORT:-8000}"
+SITE_PORT="${SITE_PORT:-4322}"
 
 log() {
   echo -e "\033[1;36m[lkm]\033[0m $*"
@@ -55,11 +59,24 @@ install_deps() {
     log "安装后端依赖 (uv sync)..."
     (cd "$BACKEND_DIR" && uv sync)
   fi
+
+  # 静态官网依赖（pnpm）
+  if [ -f "$SITE_DIR/package.json" ]; then
+    log "安装静态官网依赖 (pnpm install)..."
+    (cd "$SITE_DIR" && pnpm install)
+  else
+    error "未找到 $SITE_DIR/package.json，跳过静态官网依赖安装。"
+  fi
 }
 
 run_frontend() {
-  log "启动前端: pnpm run dev"
+  log "启动 SSR 前端: pnpm run dev"
   (cd "$FRONTEND_DIR" && pnpm run dev)
+}
+
+run_static_site() {
+  log "启动静态官网: pnpm run dev --port $SITE_PORT"
+  (cd "$SITE_DIR" && pnpm run dev --port "$SITE_PORT")
 }
 
 run_backend() {
@@ -87,17 +104,22 @@ install_deps yes
 
 case "$MODE" in
   front|前端)
-    log "前端（仅）"
+    log "SSR 前端（仅）"
     run_frontend
+    ;;
+  site|static|静态官网)
+    log "静态官网（仅）"
+    run_static_site
     ;;
   back|后端)
     log "后端（仅）"
     run_backend
     ;;
   all|*)
-    log "同时启动前端与后端（Ctrl+C 可同时停止）"
+    log "同时启动 SSR 前端、静态官网与后端（Ctrl+C 可同时停止）"
     trap 'echo; log "收到退出信号，正在停止..."; kill 0 2>/dev/null' INT TERM EXIT
     run_frontend &
+    run_static_site &
     run_backend &
     wait
     ;;
