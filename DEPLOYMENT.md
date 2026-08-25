@@ -2,24 +2,30 @@
 
 本文档说明如何把 LKM 网站(前端 Astro + 后端 FastAPI)通过 nginx 统一入口部署到生产主机。
 
+> **当前实际部署为「测试 IP 直连」模式**:无正式域名,对外走测试 IP `124.220.55.235`(HTTP 为主 +
+> 自签证书兜底)。下文把「正式域名 + Let's Encrypt」作为可选路径,与「三·五 无域名/公网 IP 直连」
+> 一节并列;当前线上的镜像与配置已按测试 IP 部署。
+
 ## 架构概览
 
-单机 docker-compose 编排 9 个服务,nginx 为唯一对外入口:
+单机 docker-compose 编排 11 个服务,nginx 为唯一对外入口:
 
 | 服务 | 镜像 | 端口(对外) | 职责 |
 |---|---|---|---|
 | `nginx` | `nginx:1.27-alpine` | `80` / `443` | TLS 终止、HTTP→HTTPS 重定向、反代分流、gzip、静态缓存 |
 | `certbot` | `certbot/certbot` | 无 | 申请与自动续期 Let's Encrypt 证书(webroot) |
 | `astro` | `lkm-official-website:latest` | 仅内网 `4321` | 前端 SSR |
-| `backend` | `lkm-service:latest` | 仅内网 `8000` | FastAPI + GraphQL |
+| `static` | `lkm-official-static:latest` | `8082` | 纯静态官网(独立 nginx 输出) |
+| `backend` | `lkm-service:latest` | 仅内网 `8000` | FastAPI(REST `/api/v1`)+ 论坛域 GraphQL |
 | `worker` | `lkm-service:latest` | 无 | 默认任务队列(ARQ)。`python -m app.core.worker_default` |
 | `worker-send` | `lkm-service:latest` | 无 | 发送队列 worker。`python -m app.core.worker_send` |
+| `worker-points` | `lkm-service:latest` | 无 | 积分事件队列 worker。`python -m app.core.worker_points` |
 | `postgres` | `postgres:16-alpine` | 仅内网 `5432` | 后端数据库 |
 | `redis` | `redis:7-alpine` | 仅内网 `6379` | 任务队列、共享限流 / 缓存(ARQ 队列、RPOPLPUSH 限流、RMW 语义) |
 | `minio` | `minio/minio:latest` | 仅容器内 `9000`/`9001` | S3 兼容对象存储:文件库文件与成员头像 |
 
-> `worker` / `worker-send` 与 `backend` 共用 `lkm-service:latest` 镜像,仅启动入口不同;
-> 两者依赖 Redis + PostgreSQL,负责异步消费任务队列(节点事件推送、发送任务等)。
+> `worker` / `worker-send` / `worker-points` 与 `backend` 共用 `lkm-service:latest` 镜像,仅启动入口不同;
+> 三者依赖 Redis + PostgreSQL,负责异步消费任务队列(节点事件推送、发送、积分事件等)。
 
 请求分流(有域名走 443 / 无域名走 80):
 
@@ -33,6 +39,8 @@
 ```
 
 后端 REST 前缀为 `/api/v1`,GraphQL 为 `/graphql`。nginx 用 Docker 内嵌 DNS(`resolver 127.0.0.11`)在运行时动态解析 `backend`/`astro`,不依赖启动期 DNS。
+
+> `static` 服务(**纯静态官网**)不挂在此 nginx 下,由独立容器输出并映射到主机 `${LKM_STATIC_PORT:-8082}` 端口,直接从 `http://<主机IP>:8082` 访问。
 
 ## 前置条件
 
@@ -185,9 +193,9 @@ curl -X POST https://lkm.s12mc.xyz/graphql \
 # 静态资源缓存头(应含 Cache-Control: public, immutable)
 curl -I https://lkm.s12mc.xyz/_astro/<某资源路径>
 
-# 成员头像(经 MinIO 存储代理端点,含 immutable 长缓存头)
-curl -I https://lkm.s12mc.xyz/api/v1/avatars/<成员.webp>
-# 期望: Cache-Control: public, max-age=31536000, immutable
+# 成员头像(头像已对象存储化,key 形如 avatars/<uid>/v<ms>.webp,经 /avatar/{user_id} 读取)
+curl -I https://lkm.s12mc.xyz/api/v1/avatar/<user_id>
+# 期望: 200(头像由后端从 S3 流式返回)
 
 # 证书链与有效期
 openssl s_client -connect lkm.s12mc.xyz:443 </dev/null 2>/dev/null | openssl x509 -noout -dates
@@ -336,33 +344,26 @@ docker run --rm -v lkm_backend_data:/data -v "$PWD":/backup alpine \
   tar czf /backup/backend_files_$(date +%F).tar.gz -C /data .
 ```
 
-## MinIO 首次初始化(建桶 + 迁移预置头像)——必做!
+## MinIO 首次初始化(建桶)——必做!
 
-**后端 S3 存储不会自动创建 MinIO 桶**。新部署的 MinIO 里没有 `lkm` 桶,头像/文件库会全部 404/失败。
-启动前先建桶并把预置成员头像迁入:
+**后端 S3 存储不会自动创建 MinIO 桶**。新部署的 MinIO 里没有 `lkm` 桶,文件库上传与头像读写会全部 404/失败。
+启动前先建桶:
 
 ```sh
-# 1. 建桶(桶名=LKM_S3_BUCKET,默认 lkm)
+# 建桶(桶名=LKM_S3_BUCKET,默认 lkm)
 docker exec <minio容器名> sh -c 'mc alias set m http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && mc mb --ignore-existing m/lkm'
-
-# 2. 迁移预置成员头像(源在 backend 容器 /app/static/avatars/*.webp,已被 COPY 进镜像)
-docker compose exec backend python -m scripts.migrate_avatars_to_s3
-
-# 3. 验证(带 URL 编码,中文文件名会被编码)
-curl http://<你的IP>/api/v1/avatars/<encodeURIComponent(名)>.webp   # 期望 200
 ```
 
-> 文件名含空格者(如 `七月Joshua Xue.webp`)经浏览器加载可能异常,若头像选择器用到需重命名对象。
+> 头像与文件库对象都在该桶内;上传/上传后由后端写回 MinIO,无需再手动预置。
 
 ## 迁移存量到 MinIO
 
-首次从「本地磁盘存储」切换到 MinIO 时,若本地已有存量,在**切换前**(`LKM_STORAGE_BACKEND=s3` 生效前)执行一次性迁移脚本把本地数据搬进 MinIO(幂等,空数据安全跳过):
+首次从「本地磁盘存储」切换到 MinIO 时,若本地文件库已有存量,在**切换前**(`LKM_STORAGE_BACKEND=s3` 生效前)执行一次性迁移脚本把本地数据搬进 MinIO(幂等,空数据安全跳过):
 
 ```sh
 cd LKM-service
 # 需先配好指向 MinIO 的 LKM_STORAGE_BACKEND=s3 及 s3_* 连接参数
 ./.venv/Scripts/python.exe -m scripts.migrate_files_to_s3       # 文件库存量
-./.venv/Scripts/python.exe -m scripts.migrate_avatars_to_s3     # 预置成员头像
 ```
 
 ## 常见问题
@@ -372,7 +373,7 @@ cd LKM-service
 - **数据库**:使用 PostgreSQL(`postgres:16-alpine` 服务,卷持久化)。后端经 `LKM_DB_*` 环境变量以 `postgresql+asyncpg` 连接;首次启动时 alembic 自动建表。
 - **换域名/子路径**:需同步改 nginx 配置的 `server_name`、证书签发域名,以及前端 `PUBLIC_SITE_URL` / `PUBLIC_BASE_PATH`、后端 compose 的 `LKM_ORIGIN`/`LKM_RP_ID`/`LKM_S3_PUBLIC_ENDPOINT_URL`。
 
-- **头像全部 404**:MinIO 桶未创建(S3 不自动建桶)。先 `mc mb .../lkm` 建桶,再 `migrate_avatars_to_s3` 迁移预置头像(见上文「MinIO 首次初始化」)。
+- **头像/文件上传 404**:MinIO 桶未创建(S3 不自动建桶)。先 `mc mb .../lkm` 建桶(见上文「MinIO 首次初始化」)。
 
 - **上传返回 403 SignatureDoesNotMatch**:boto3 对 MinIO 默认生成 SigV2 签名,MinIO 不认 → 需在 s3.py 预签名 client 显式 `signature_version="s3v4"` + `addressing_style="path"` + 给 region。且预签名 URL 的 host 必须与浏览器实际访问的 host 一致(`LKM_S3_PUBLIC_ENDPOINT_URL`)。
 

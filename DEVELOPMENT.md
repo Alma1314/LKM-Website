@@ -20,12 +20,12 @@ LKM 网站由三份独立 git 仓库组成(根仓库仅做编排,包含本教程
 LKM-Website/                  # 根仓库(编排入口,含 docker-compose.yml / dev 脚本 / 本教程)
 ├── DEVELOPMENT.md            # 本文件
 ├── DEPLOYMENT.md             # 生产部署教程
-├── docker-compose.yml        # 生产编排(nginx + astro + backend + postgres + redis)
+├── docker-compose.yml        # 生产编排(nginx/astro/static/postgres/redis/minio/backend/worker 等)
 ├── dev.bat / dev.ps1 / dev.sh# 本地一键启动脚本
 ├── .gitignore                # 忽略 .env、记忆目录等敏感/本地文件
 ├── docs/                     # 设计文档与需求总结(被 gitignore 忽略,不入库)
 ├── LKM-official-website/     # 前端仓库(Astro + Vue/React islands)
-└── LKM-service/              # 后端仓库(FastAPI + GraphQL)
+└── LKM-service/              # 后端仓库(FastAPI,REST /api/v1 + 论坛域 GraphQL)
 ```
 
 > 三个仓库彼此独立,各自有 `.git`。根仓库只放编排与文档,**不会也不能**包含子项目代码。
@@ -83,7 +83,7 @@ cp .env.example .env      # 首次;设置 API_URL=http://127.0.0.1:8000
 pnpm dev
 ```
 
-本地默认使用 **SQLite**(`lkm.db`),零数据库配置即可跑通;默认端口:前端 `5173`、后端 `8000`。
+本地默认使用 **SQLite**(`lkm.db`),零数据库配置即可跑通;默认端口:前端 `4321`、后端 `8000`。
 
 ---
 
@@ -110,24 +110,25 @@ LKM_VERIFICATION_CODE_PEPPER=<与上面都不同>
 
 后端存储抽象为 Local/S3 双后端(`LKM_STORAGE_BACKEND`,默认 `local`)。本地开发默认走本地磁盘:
 
-- **文件库**:存在 `files_store/`;头像等 `avatars/`。均经 `get_storage()` 统一读写。
-- **头像端点**:`GET /api/v1/avatars/{name}.webp`,从 storage 流式返回,带
-  `public, max-age=31536000, immutable` 长缓存头;内容不变时文件名即指纹。
+- **本地磁盘存储**:文件库存在 `files_store/`;头像按 `avatars/<uid>/v<ms>.webp` 存放。
+  均经 `get_storage()` 统一读写。
+- **头像端点**:`GET /api/v1/avatar/{user_id}`,从 storage 流式返回(`Content-Type: image/webp`)。
 - **切 MinIO/S3 对象存储**:设 `LKM_STORAGE_BACKEND=s3`,并配
   `LKM_S3_ENDPOINT_URL`(本地 MinIO 填 `http://127.0.0.1:9000`)、`LKM_S3_BUCKET`(默认 `lkm`)、
   `LKM_S3_PREFIX`(默认 `files`)、`LKM_S3_ACCESS_KEY` / `LKM_S3_SECRET_KEY`。
-- **存量迁移**:本地磁盘已有文件时,在切换 S3 前跑一次性脚本搬迁(幂等):
-  `./.venv/Scripts/python.exe -m scripts.migrate_files_to_s3` 、
-  `./.venv/Scripts/python.exe -m scripts.migrate_avatars_to_s3`。
+  生产 compose 已默认 `s3`,桶在首次部署时手动用 `mc mb` 创建(S3 不自动建桶)。
+- **存量迁移**:本地磁盘的文件库已有存量时,在切换 S3 前跑一次性脚本搬迁(幂等):
+  `./.venv/Scripts/python.exe -m scripts.migrate_files_to_s3`。
 
 ### 任务队列(worker)
 
-后端用 Redis + ARQ 消费异步任务(节点事件推送、发送任务等),生产由 compose 的 `worker` /
-`worker-send` 两个服务独立消费。本地 dev 脚本不启动 worker,需要验证队列消费时手动起:
+后端用 Redis + ARQ 消费异步任务(节点事件推送、发送、积分事件等),生产由 compose 的 `worker` /
+`worker-send` / `worker-points` 三个服务独立消费。本地 dev 脚本不启动 worker,需要验证队列消费时手动起:
 
 ```sh
 uv run python -m app.core.worker_default   # 默认队列
 uv run python -m app.core.worker_send      # 发送队列
+uv run python -m app.core.worker_points    # 积分事件队列
 ```
 
 ### 测试
@@ -169,7 +170,7 @@ PUBLIC_BASE_PATH=       # 子路径部署(可选,默认 /)
 ### 常用命令
 
 ```sh
-pnpm dev               # 开发服务器(端口 5173)
+pnpm dev               # 开发服务器(端口 4321)
 pnpm dev:clean         # 清 vite 缓存后重启(遇 dev 异常时用)
 pnpm check             # astro check + eslint + prettier 全量校验
 pnpm typecheck         # 仅 astro check
