@@ -18,6 +18,8 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
+      static:
+        condition: service_started
     networks:
       - lkm
 
@@ -45,6 +47,7 @@ services:
       HOST: 0.0.0.0
       PORT: 4321
       API_URL: http://backend:8000
+      PUBLIC_SITE_URL: https://lkm-ahz.ltd
     restart: unless-stopped
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:4321/robots.txt']
