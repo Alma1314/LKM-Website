@@ -107,6 +107,22 @@ services:
     networks:
       - lkm
 
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-lkm}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?生产需设置 RABBITMQ_DEFAULT_PASS}
+    ports:
+      - '15672:15672'
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - lkm
+
   minio:
     image: minio/minio:latest
     command: ['server', '/data', '--console-address', ':9001']
@@ -139,6 +155,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       LKM_ENV: production
       LKM_DB_DRIVER: postgresql
@@ -148,6 +166,7 @@ services:
       LKM_DB_USER: ${POSTGRES_USER:-lkm}
       LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
       LKM_REDIS_URL: redis://redis:6379/0
+      LKM_RABBIT_URL: amqp://lkm:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
       # 多 worker：按压测基线调，默认单 worker；多核下水平跑满 CPU
       LKM_WEB_WORKERS: ${LKM_WEB_WORKERS:-1}
       LKM_BLOG_REPO_DIR: /data/blog_repos
@@ -197,12 +216,15 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       LKM_ENV: production
       LKM_JWT_SECRET: ${LKM_JWT_SECRET:?生产需设置 LKM_JWT_SECRET}
       LKM_TOTP_ENCRYPTION_KEY: ${LKM_TOTP_ENCRYPTION_KEY:?生产需设置 LKM_TOTP_ENCRYPTION_KEY}
       LKM_VERIFICATION_CODE_PEPPER: ${LKM_VERIFICATION_CODE_PEPPER:?生产需设置 LKM_VERIFICATION_CODE_PEPPER}
       LKM_REDIS_URL: redis://redis:6379/0
+      LKM_RABBIT_URL: amqp://lkm:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
       LKM_DB_DRIVER: postgresql
       LKM_DB_HOST: postgres
       LKM_DB_PORT: 5432
@@ -221,12 +243,15 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       LKM_ENV: production
       LKM_JWT_SECRET: ${LKM_JWT_SECRET:?生产需设置 LKM_JWT_SECRET}
       LKM_TOTP_ENCRYPTION_KEY: ${LKM_TOTP_ENCRYPTION_KEY:?生产需设置 LKM_TOTP_ENCRYPTION_KEY}
       LKM_VERIFICATION_CODE_PEPPER: ${LKM_VERIFICATION_CODE_PEPPER:?生产需设置 LKM_VERIFICATION_CODE_PEPPER}
       LKM_REDIS_URL: redis://redis:6379/0
+      LKM_RABBIT_URL: amqp://lkm:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
       LKM_DB_DRIVER: postgresql
       LKM_DB_HOST: postgres
       LKM_DB_PORT: 5432
@@ -248,12 +273,15 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       LKM_ENV: production
       LKM_JWT_SECRET: ${LKM_JWT_SECRET:?生产需设置 LKM_JWT_SECRET}
       LKM_TOTP_ENCRYPTION_KEY: ${LKM_TOTP_ENCRYPTION_KEY:?生产需设置 LKM_TOTP_ENCRYPTION_KEY}
       LKM_VERIFICATION_CODE_PEPPER: ${LKM_VERIFICATION_CODE_PEPPER:?生产需设置 LKM_VERIFICATION_CODE_PEPPER}
       LKM_REDIS_URL: redis://redis:6379/0
+      LKM_RABBIT_URL: amqp://lkm:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
       LKM_DB_DRIVER: postgresql
       LKM_DB_HOST: postgres
       LKM_DB_PORT: 5432
@@ -263,6 +291,64 @@ services:
       LKM_BLOG_REPO_DIR: /data/blog_repos   # 与 backend 同卷同路径
     volumes:
       - backend_data:/data
+    restart: unless-stopped
+    networks:
+      - lkm
+
+  worker-notify:
+    image: lkm-service:latest
+    command: ['python', '-m', 'app.core.worker_notify']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      LKM_ENV: production
+      LKM_REDIS_URL: redis://redis:6379/0
+      LKM_RABBIT_URL: amqp://lkm:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      LKM_DB_DRIVER: postgresql
+      LKM_DB_HOST: postgres
+      LKM_DB_PORT: 5432
+      LKM_DB_NAME: ${POSTGRES_DB:-lkm}
+      LKM_DB_USER: ${POSTGRES_USER:-lkm}
+      LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
+    restart: unless-stopped
+    networks:
+      - lkm
+
+  worker-scheduler:
+    image: lkm-service:latest
+    command: ['python', '-m', 'app.core.worker_scheduler']
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      LKM_ENV: production
+      LKM_RABBIT_URL: amqp://lkm:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+    restart: unless-stopped
+    networks:
+      - lkm
+
+  worker-dlq:
+    image: lkm-service:latest
+    command: ['python', '-m', 'app.core.worker_dlq']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      LKM_ENV: production
+      LKM_RABBIT_URL: amqp://lkm:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      LKM_DB_DRIVER: postgresql
+      LKM_DB_HOST: postgres
+      LKM_DB_PORT: 5432
+      LKM_DB_NAME: ${POSTGRES_DB:-lkm}
+      LKM_DB_USER: ${POSTGRES_USER:-lkm}
+      LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
     restart: unless-stopped
     networks:
       - lkm
