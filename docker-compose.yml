@@ -353,6 +353,32 @@ services:
     networks:
       - lkm
 
+  # outbox relay（M1）：单 leader（Redis 租约）轮询 outbox_events，把 DB 落 event 发布到
+  # RabbitMQ lkm.events。需 DB（读 outbox）+ Redis（leader 租约）+ Rabbit（publish）。
+  worker-outbox:
+    image: lkm-service:latest
+    command: ['python', '-m', 'app.core.worker_outbox']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      LKM_ENV: production
+      LKM_REDIS_URL: redis://redis:6379/0
+      LKM_RABBIT_URL: amqp://lkm:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      LKM_DB_DRIVER: postgresql
+      LKM_DB_HOST: postgres
+      LKM_DB_PORT: 5432
+      LKM_DB_NAME: ${POSTGRES_DB:-lkm}
+      LKM_DB_USER: ${POSTGRES_USER:-lkm}
+      LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
+    restart: unless-stopped
+    networks:
+      - lkm
+
 volumes:
   certbot_conf:
   certbot_www:
