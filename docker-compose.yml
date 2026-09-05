@@ -208,6 +208,48 @@ services:
     networks:
       - lkm
 
+  # AUTH 独立进程（B1.1）：与单体的 backend 同镜像(同代码库/同配置源)、异 command。
+  # 跑只读/认证面 `app.main_auth:app`，自持 DB+Redis 依赖与专属 /liveness|/readiness 健康缝。
+  # 纯增量、不改单体拓扑：仅内网暴露(无主机端口映射，B1.2 才由 nginx 反代接出)。
+  # healthcheck 打本进程自己的 /liveness：进程能应答即心跳 OK；依赖就绪由 below depends_on 判定。
+  auth:
+    image: lkm-service:latest
+    command: ['python', '-m', 'app.main_auth']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      LKM_ENV: production
+      LKM_JWT_SECRET: ${LKM_JWT_SECRET:?生产需设置 LKM_JWT_SECRET}
+      LKM_TOTP_ENCRYPTION_KEY: ${LKM_TOTP_ENCRYPTION_KEY:?生产需设置 LKM_TOTP_ENCRYPTION_KEY}
+      LKM_VERIFICATION_CODE_PEPPER: ${LKM_VERIFICATION_CODE_PEPPER:?生产需设置 LKM_VERIFICATION_CODE_PEPPER}
+      LKM_REDIS_URL: redis://redis:6379/0
+      LKM_RABBIT_URL: amqp://lkm:${RABBITMQ_DEFAULT_PASS}@rabbitmq:5672/
+      LKM_DB_DRIVER: postgresql
+      LKM_DB_HOST: postgres
+      LKM_DB_PORT: 5432
+      LKM_DB_NAME: ${POSTGRES_DB:-lkm}
+      LKM_DB_USER: ${POSTGRES_USER:-lkm}
+      LKM_DB_PASSWORD: ${POSTGRES_PASSWORD:?生产需设置 POSTGRES_PASSWORD}
+      LKM_RP_ID: ${LKM_RP_ID:-124.220.55.235}
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/liveness', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - lkm
+
   worker-send:
     image: lkm-service:latest
     command: ['python', '-m', 'app.core.worker_send']
